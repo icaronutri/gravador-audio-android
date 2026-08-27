@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Transcritor IA — Local</title>
+<style>
+  :root{font-family:Inter,system-ui,Arial,sans-serif;color:#172033;background:#f5f7fb}
+  *{box-sizing:border-box} body{margin:0;background:#f5f7fb}
+  .wrap{max-width:980px;margin:30px auto;padding:0 18px}
+  .card{background:#fff;border:1px solid #e7eaf0;border-radius:18px;box-shadow:0 8px 30px rgba(20,32,60,.07);padding:22px;margin-bottom:18px}
+  h1{margin:0 0 6px;font-size:28px} .sub{color:#687386;margin-bottom:18px}
+  .top{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.status{padding:7px 11px;border-radius:999px;background:#eef2f7;font-weight:700}.status.rec{background:#ffe8e8;color:#a91d1d}.status.pause{background:#fff3d6;color:#8a6200}
+  .timer{font-size:42px;font-weight:800;letter-spacing:1px;margin:18px 0}
+  .controls{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.controls button,.secondary{border:0;border-radius:11px;padding:13px 14px;font-weight:700;cursor:pointer;background:#173f73;color:#fff}.controls button:disabled{opacity:.4;cursor:not-allowed}.controls .danger{background:#a92323}.controls .muted{background:#596579}
+  textarea{width:100%;min-height:250px;border:1px solid #dce2ea;border-radius:12px;padding:14px;font:inherit;resize:vertical;line-height:1.5}
+  .row{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px}.row h2{margin:0;font-size:19px}
+  .actions{display:flex;gap:8px;flex-wrap:wrap}.secondary{background:#eef2f7;color:#22314a;padding:9px 12px}
+  .history{display:grid;gap:10px}.item{border:1px solid #e3e7ee;border-radius:12px;padding:13px}.itemHead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.meta{color:#6d7788;font-size:13px}.itemActions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}.itemActions button{border:0;border-radius:8px;padding:7px 9px;cursor:pointer;background:#eef2f7}.empty{color:#7a8493;padding:10px 0}
+  .note{font-size:13px;color:#6d7788;margin-top:10px}.warn{background:#fff7df;border:1px solid #f0dda1;border-radius:10px;padding:10px 12px;color:#6b5600;margin-top:12px}
+  @media(max-width:720px){.controls{grid-template-columns:1fr 1fr}.timer{font-size:34px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Transcritor IA — Local</h1>
+    <div class="sub">Versão web para testar no PC usando o microfone do navegador.</div>
+    <div class="top"><span id="status" class="status">Parado</span><span id="support"></span></div>
+    <div id="timer" class="timer">00:00:00</div>
+    <div class="controls">
+      <button id="start">Iniciar gravação</button>
+      <button id="pause" class="muted" disabled>Pausar</button>
+      <button id="resume" class="muted" disabled>Retomar</button>
+      <button id="finish" class="danger" disabled>Finalizar</button>
+    </div>
+    <div id="warning" class="warn" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><h2>Transcrição</h2><div class="actions"><button class="secondary" id="copy">Copiar</button><button class="secondary" id="clear">Limpar texto</button></div></div>
+    <textarea id="text" placeholder="A transcrição aparecerá aqui..."></textarea>
+    <div class="note">No Chrome/Edge, a transcrição usa o reconhecimento de voz do navegador quando disponível. O áudio é gravado separadamente.</div>
+  </div>
+
+  <div class="card">
+    <div class="row"><h2>Histórico local</h2><div class="actions"><button class="secondary" id="refresh">Atualizar</button><button class="secondary" id="clearHistory">Apagar histórico</button></div></div>
+    <div id="history" class="history"></div>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const startBtn=$('start'), pauseBtn=$('pause'), resumeBtn=$('resume'), finishBtn=$('finish');
+const statusEl=$('status'), timerEl=$('timer'), textEl=$('text'), warningEl=$('warning'), supportEl=$('support');
+let stream=null, recorder=null, chunks=[], startedAt=0, pausedTotal=0, pausedAt=0, timerId=null, recognition=null, finalText='';
+const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
+supportEl.textContent = SpeechRecognition ? 'Transcrição do navegador disponível' : 'Transcrição automática indisponível neste navegador';
+
+function fmt(ms){const s=Math.max(0,Math.floor(ms/1000)),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return [h,m,ss].map(v=>String(v).padStart(2,'0')).join(':')}
+function setStatus(t,c=''){statusEl.textContent=t;statusEl.className='status '+c}
+function startTimer(){clearInterval(timerId);timerId=setInterval(()=>{const end=pausedAt||Date.now();timerEl.textContent=fmt(end-startedAt-pausedTotal)},250)}
+function stopTimer(){clearInterval(timerId);timerId=null}
+function buttons(state){startBtn.disabled=state!=='idle';pauseBtn.disabled=state!=='recording';resumeBtn.disabled=state!=='paused';finishBtn.disabled=state==='idle'}
+function showWarn(msg){warningEl.style.display='block';warningEl.textContent=msg} function hideWarn(){warningEl.style.display='none'}
+
+async function openDb(){return new Promise((resolve,reject)=>{const r=indexedDB.open('transcritorIA',1);r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains('records'))db.createObjectStore('records',{keyPath:'id'})};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
+async function saveRecord(rec){const db=await openDb();return new Promise((resolve,reject)=>{const tx=db.transaction('records','readwrite');tx.objectStore('records').put(rec);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)})}
+async function allRecords(){const db=await openDb();return new Promise((resolve,reject)=>{const r=db.transaction('records').objectStore('records').getAll();r.onsuccess=()=>resolve(r.result.sort((a,b)=>b.createdAt-a.createdAt));r.onerror=()=>reject(r.error)})}
+async function deleteAll(){const db=await openDb();return new Promise((resolve,reject)=>{const tx=db.transaction('records','readwrite');tx.objectStore('records').clear();tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)})}
+function startRecognition(){if(!SpeechRecognition)return; try{recognition=new SpeechRecognition();recognition.lang='pt-BR';recognition.continuous=true;recognition.interimResults=true;recognition.onresult=e=>{let interim='';for(let i=e.resultIndex;i<e.results.length;i++){const t=e.results[i][0].transcript;if(e.results[i].isFinal)finalText+=(finalText?' ':'')+t;else interim+=t}textEl.value=(finalText+(interim?' '+interim:'')).trim()};recognition.onerror=e=>{if(e.error!=='no-speech')showWarn('Reconhecimento de voz: '+e.error)};recognition.onend=()=>{if(recorder&&recorder.state==='recording'){try{recognition.start()}catch{}}};recognition.start()}catch(e){showWarn('Não foi possível iniciar a transcrição automática: '+e.message)}}
+function stopRecognition(){if(recognition){try{recognition.onend=null;recognition.stop()}catch{} recognition=null}}
+
+startBtn.onclick=async()=>{hideWarn();try{stream=await navigator.mediaDevices.getUserMedia({audio:true});chunks=[];finalText=textEl.value.trim();const mime=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus'].find(MediaRecorder.isTypeSupported)||'';recorder=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};recorder.start(1000);startedAt=Date.now();pausedTotal=0;pausedAt=0;timerEl.textContent='00:00:00';startTimer();setStatus('Gravando','rec');buttons('recording');startRecognition()}catch(e){showWarn('Não foi possível acessar o microfone: '+e.message)}};
+pauseBtn.onclick=()=>{if(recorder?.state==='recording'){recorder.pause();pausedAt=Date.now();setStatus('Pausado','pause');buttons('paused');stopRecognition()}};
+resumeBtn.onclick=()=>{if(recorder?.state==='paused'){pausedTotal+=Date.now()-pausedAt;pausedAt=0;recorder.resume();setStatus('Gravando','rec');buttons('recording');startRecognition()}};
+finishBtn.onclick=()=>{if(!recorder)return;const duration=(pausedAt||Date.now())-startedAt-pausedTotal;stopRecognition();recorder.onstop=async()=>{const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'});await saveRecord({id:crypto.randomUUID(),createdAt:Date.now(),duration,text:textEl.value.trim(),blob,type:blob.type});stream?.getTracks().forEach(t=>t.stop());stream=null;recorder=null;chunks=[];stopTimer();setStatus('Finalizado');buttons('idle');pausedAt=0;await renderHistory()};recorder.stop()};
+$('copy').onclick=async()=>{await navigator.clipboard.writeText(textEl.value);};
+$('clear').onclick=()=>{textEl.value='';finalText=''};
+$('refresh').onclick=renderHistory;
+$('clearHistory').onclick=async()=>{if(confirm('Apagar todo o histórico local?')){await deleteAll();renderHistory()}};
+
+async function renderHistory(){const host=$('history');const list=await allRecords();host.innerHTML='';if(!list.length){host.innerHTML='<div class="empty">Nenhuma gravação salva ainda.</div>';return}for(const r of list){const d=new Date(r.createdAt);const url=URL.createObjectURL(r.blob);const el=document.createElement('div');el.className='item';el.innerHTML=`<div class="itemHead"><div><strong>${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</strong><div class="meta">Duração: ${fmt(r.duration)}</div></div></div><div style="margin-top:8px;white-space:pre-wrap">${escapeHtml(r.text||'(sem transcrição)')}</div><audio controls src="${url}" style="width:100%;margin-top:10px"></audio><div class="itemActions"><button data-copy>Copiar texto</button><button data-down>Baixar áudio</button></div>`;el.querySelector('[data-copy]').onclick=()=>navigator.clipboard.writeText(r.text||'');el.querySelector('[data-down]').onclick=()=>{const a=document.createElement('a');a.href=url;a.download=`gravacao-${d.toISOString().replace(/[:.]/g,'-')}.webm`;a.click()};host.appendChild(el)}}
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]))}
+buttons('idle');renderHistory();
+</script>
+</body>
+</html>
